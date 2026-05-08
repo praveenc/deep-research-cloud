@@ -26,3 +26,5 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+docs/design/arch-review*.md
