@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Research Cloud</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      background: #f8f6f3;
+      color: #1a1a1a;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      text-align: center;
+      padding: 2rem;
+      max-width: 600px;
+    }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
+    p { color: #6a6a6a; font-size: 1.1rem; margin-bottom: 1.5rem; }
+    .badge {
+      display: inline-block;
+      background: #9dd4c7;
+      color: #1a1a1a;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+    .stack {
+      margin-top: 2rem;
+      text-align: left;
+      background: white;
+      border: 1px solid #e8e6e3;
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+    .stack h2 { font-size: 1rem; margin-bottom: 0.75rem; color: #4a4a4a; }
+    .stack ul { list-style: none; }
+    .stack li {
+      padding: 0.4rem 0;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 0.9rem;
+      color: #5a5a5a;
+    }
+    .stack li:last-child { border-bottom: none; }
+    .stack li::before { content: "✓ "; color: #059669; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Deep Research Cloud</h1>
+    <p>AI-powered research reports on AWS &amp; cloud technology</p>
+    <span class="badge">Placeholder — React SPA coming soon</span>
+
+    <div class="stack">
+      <h2>Architecture</h2>
+      <ul>
+        <li>AgentCore Runtime — Strands SDK agent</li>
+        <li>Lambda MCP Servers (fetch, aws-docs, brave, github, feeds)</li>
+        <li>API Gateway REST + WebSocket</li>
+        <li>Cognito authentication</li>
+        <li>CloudFront + S3 distribution</li>
+        <li>ADOT/OpenTelemetry observability</li>
+        <li>CloudWatch dashboard + budget alarms</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>
