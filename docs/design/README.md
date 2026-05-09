@@ -1,275 +1,459 @@
-# Deep Research Cloud — Final Architecture Design
+# Deep Research Cloud — Architecture Design
 
-> Single Strands Agent on AgentCore Runtime with Lambda-hosted MCP servers.  
-> The local `aws-deep-research` skill translated 1:1 to cloud with minimal transformation.
+> Serverless research pipeline that migrates the local `aws-deep-research` skill
+> to a fully cloud-native deployment on AWS.
 
 ![Architecture Diagram](./architecture.png)
 
 ## Design Principles
 
-1. **Minimal translation** — local skill architecture maps directly to cloud (parent agent + sub-agents + tools)
-2. **Progressive disclosure** — `AgentSkills` plugin loads skill instructions on-demand, not upfront
-3. **Context isolation** — Pattern 3 (Meta-Tool) sub-agents keep raw content out of parent context
-4. **Zero idle cost** — Lambda MCPs + AgentCore Runtime (on-demand) = $0 when not researching
-5. **Secrets Manager** — all API keys retrieved at runtime, never env vars
-6. **Observable by default** — ADOT/OpenTelemetry traces, Bedrock metrics, CW dashboards, budget alarms
+1. **Minimal moving parts** — one agent Lambda, one MCP Runtime, shared data layer
+2. **Progressive disclosure** — skills loaded on-demand via Strands `AgentSkills` plugin
+3. **Context isolation** — in-process sub-agents (Pattern 3) keep raw content out of parent context
+4. **Secrets Manager for all API keys** — never env vars, never hardcoded
+5. **$0 idle cost** — Lambda scales to zero; Runtime sessions terminate after 15 min idle
+6. **Observable** — CloudWatch, X-Ray, DynamoDB tracking
 
-## Architecture Summary
-
-| Layer | Service | Count | Purpose |
-|-------|---------|-------|---------|
-| Frontend | CloudFront + S3 | 1 | React SPA, report viewer |
-| API | API Gateway (REST + WS) | 1 | Auth (Cognito JWT), async invoke, WS progress |
-| Agent | AgentCore Runtime | 1 agent | Full research lifecycle — orchestrate, research, synthesize, visualize |
-| MCP Servers | Lambda (Direct Invoke) + ADOT Layer | 5 | fetch, aws-docs, brave, github, feeds |
-| Data | S3, DynamoDB, Secrets Manager | 3 | Artifacts, tracking, secrets |
-| Observability | ADOT/OTel, CloudWatch | — | Traces, metrics, dashboards, alarms |
-
-**Total: 1 Runtime agent + 5 Lambdas + supporting services**
-
-## AgentCore Runtime — Validated Constraints
-
-Validated via AgentCore Slack bot (May 2026):
-
-| Limit | Value | Mitigation |
-|-------|-------|-----------|
-| Container init | 120s hard | Lightweight container — no issue |
-| Invocation response timeout | ~500s (observed, not documented) | Async invoke — don't wait for response |
-| Idle session timeout | Up to 8 hours (configurable) | Configure for research duration |
-| InvokeAgentRuntime TPS | 25/agent (adjustable via Service Quotas) | Single-user research — fine |
-
-**Pattern:** Async invocation + HealthyBusy signaling + WebSocket push.  
-The agent doesn't respond via the invoke API. It pushes progress/results via WS and writes to S3.
-
-## Execution Flow
+## Architecture Overview
 
 ```
-User submits query via SPA
-  → APIGW authenticates (Cognito JWT)
-  → Async invoke → AgentCore Runtime agent
-  → Agent activates aws-deep-research skill (progressive disclosure)
-  → Agent performs:
-      1. Intent classification + strategy selection
-      2. Query decomposition + slug generation
-      3. Research contract → S3
-      4. Dispatch sub-agents IN PARALLEL (Pattern 3, isolated context):
-         • aws-mcp-researcher → calls aws-docs-mcp, fetch-mcp Lambdas → writes findings to S3
-         • web-content-researcher → calls brave-mcp, fetch-mcp, feeds-mcp Lambdas → writes to S3
-         • github-researcher → calls github-mcp Lambda → writes to S3
-         (pushes WS progress after each completes)
-      5. Verify findings (check S3 file sizes)
-      6. Synthesizer sub-agent → reads all findings from S3 → writes report to S3
-      7. Visual-generator sub-agent (frontend-design + highcharts skills) → writes HTML to S3
-      8. Push "complete" via WebSocket with report URL
-  → User views report at CloudFront: /reports/<slug>/
+User → CloudFront (React SPA)
+         → API Gateway (REST + WebSocket)
+           → Lambda Authorizer (Cognito JWT)
+           → POST /research → Pre-processing Lambda (1-2 LLM calls, ~15-30s)
+               • Intent, strategy, decompose, slug, contract
+               • Writes research-contract.md → S3
+               • Simple query → invokes Agent Lambda directly (async)
+               • Complex query → returns decomposition + contract to client for approval
+           → POST /research/{slug}/start → Agent Lambda (Strands Agent, 3-7 min)
+               • Loads aws-deep-research skill via AgentSkills plugin
+               • Spawns sub-agents (Pattern 3) for context isolation
+               • Connects to MCP server on AgentCore Runtime
+               • Writes findings/report to S3
+               • Pushes progress via WebSocket
+           → AgentCore Runtime: research-mcp-server
+               • Single FastMCP server with all research tools
+               • fetch, aws_doc_search, brave_search, github_search, feed_extract
+               • Reads API keys from Secrets Manager
+           → S3 (artifacts) + DynamoDB (tracking) + Secrets Manager (keys)
 ```
 
-## Skills (Loaded via AgentSkills Plugin)
+## Component Summary
 
-| Skill | When Activated | Resources |
-|-------|---------------|-----------|
-| `aws-deep-research` | Always (primary skill) | scripts/, references/ (loaded on-demand) |
-| `frontend-design` | Visual generation step | SKILL.md only (~4KB) |
-| `highcharts` | Chart generation | references/ (API docs, loaded per chart type) |
-| `html-design` | HTML artifact styling | references/ (theme tokens) |
+| Layer | Service | Purpose |
+|-------|---------|---------|
+| Frontend | CloudFront + S3 | React SPA — query submission, contract review, progress view, report viewer |
+| API | API Gateway (REST + WS) | Auth (Cognito JWT), routing, real-time WebSocket progress |
+| Pre-process | **Lambda** (Strands SDK) | 1–2 LLM calls: intent, strategy, decompose, slug, research contract → S3 |
+| Agent | **Lambda** (Strands SDK) | Orchestrates research — dispatch sub-agents, verify, synthesize, generate visuals |
+| MCP Tools | **AgentCore Runtime** (FastMCP) | Single Runtime hosting all research tools — fetch, aws-docs, brave, github, feeds |
+| Skills | Packaged with both Lambdas | `aws-deep-research` + `frontend-design` — loaded via progressive disclosure |
+| Data | S3 | Research artifacts: `s3://bucket/<slug>/` — contract, findings, report, visuals |
+| Data | DynamoDB | Task tracking, API budget per user, WebSocket connection IDs |
+| Secrets | Secrets Manager | `BRAVE_API_KEY`, `TAVILY_API_KEY`, `GITHUB_TOKEN` |
 
-**Context budget:** ~100 tokens per skill at startup (metadata only).  
-Full instructions loaded on activation (~5K tokens). Resources loaded incrementally as needed.
+## Key Design Decisions
 
-## Cost Tracking & Observability
+### Why Two Lambdas (Pre-processing + Agent)
 
-### Distributed Tracing: ADOT + OpenTelemetry
+The research lifecycle has a natural break point: after query decomposition and
+research contract creation (1–2 LLM calls, ~15–30 seconds), the user may need
+to review and approve the contract before expensive research begins.
 
-AWS X-Ray SDKs entered maintenance mode Feb 2026 (end-of-support Feb 2027).
-We use **OpenTelemetry instrumentation** via AWS Distro for OpenTelemetry (ADOT),
-which sends traces to the CloudWatch backend (Application Signals + Transaction Search).
+**Pre-processing Lambda** (`POST /research`):
+- 1–2 LLM calls: intent → strategy → decompose → slug → contract
+- Writes `research-contract.md` → S3
+- For **simple queries** (1–2 entities): invokes Agent Lambda directly (async)
+- For **complex queries** (3+ entities): returns decomposition + contract to client
+  for approval; no Lambda sits idle waiting — the client holds state
 
-| Component | Instrumentation | How |
-|-----------|----------------|-----|
-| **Agent (Runtime)** | `strands-agents[otel]` | Native — set `OTEL_EXPORTER_OTLP_ENDPOINT` env var |
-| **Lambda MCP servers** | ADOT Lambda Layer | Auto-instrumentation, no code changes |
-| **Trace backend** | CloudWatch Application Signals | OTel Collector → OTLP → CloudWatch |
+**Agent Lambda** (`POST /research/{slug}/start`):
+- Reads approved contract from S3
+- Loads `aws-deep-research` skill, dispatches sub-agents, verifies, synthesizes
+- Gets the full 15-minute timeout budget for research (no time wasted on approval wait)
 
-**Strands SDK auto-traces (zero-config):**
-- Agent reasoning loops (each turn = span)
-- LLM calls (model ID, tokens in/out, latency as span attributes)
-- Tool executions (tool name, duration, success/failure)
-- Sub-agent invocations (child spans with isolated context)
+Both Lambdas give us:
+- **$0 idle cost** — no traffic, no charge
+- **Native Step Functions–free orchestration** — the agent IS the orchestrator
+- **Simple deployment** — SAM/CDK, no container image management
+- **IAM-only auth** to call MCP server on Runtime (SigV4)
+- **Failure isolation** — bad decomposition fails fast without wasting research budget
 
-**ADOT Lambda Layer auto-traces:**
-- Lambda invocation lifecycle (init, invoke, shutdown)
-- Downstream AWS SDK calls (S3, DynamoDB, Secrets Manager)
-- Cold start vs warm start differentiation
+### Why AgentCore Runtime for MCP Servers (not Lambda)
 
-**Viewing traces:**
-- CloudWatch → Application Signals (service map — see full topology)
-- CloudWatch → Transaction Search (filter by slug, user, duration, error)
-- End-to-end span: APIGW → Runtime → sub-agent → Lambda MCP → S3/DDB
+The local skill's MCP servers (`fetchv2`, search scripts) are translated into a single
+FastMCP server deployed on AgentCore Runtime. Runtime provides:
 
-**Trace sampling:** X-Ray free tier covers 100K traces/month. Use OTel sampler
-at 10% in production (100% in dev). Budget stays within free tier for ~1M runs/month.
+- **Session isolation** — each research run gets its own microVM; tools share cached
+  state (API keys, intermediate results) within a session
+- **No cold starts within a session** — first call spins up the microVM, subsequent
+  tool calls in the same session hit a warm process
+- **Up to 8 hours session lifetime** — no timeout pressure for complex research
+- **Native MCP Streamable HTTP** — standard transport at `0.0.0.0:8000/mcp`; Strands
+  SDK's `MCPClient` connects without any adapter
+- **Single deployment** — one Runtime, one FastMCP server, all tools registered via
+  `@mcp.tool()` decorators
 
-### Token Usage (Ground Truth)
+#### All research tools in one Runtime
 
-Every Bedrock call returns `response.usage`:
-- `InputTokens`, `OutputTokens`, `TotalTokens`
-- `CacheReadInputTokens`, `CacheWriteInputTokens`
+```python
+# research_mcp_server.py
+from mcp.server.fastmcp import FastMCP
 
-The agent captures this per sub-agent invocation and:
-1. Attaches as OTel span attributes (queryable in Transaction Search)
-2. Emits as CW custom metrics (dimensioned by slug, agent, model)
-3. Writes to DynamoDB cost ledger (per slug/user)
+mcp = FastMCP("research-tools", host="0.0.0.0", stateless_http=True)
 
-**Tokenizer parity note:** Local estimates (tiktoken, etc.) diverge from Bedrock's
-internal tokenization on non-English text, code, and whitespace. Always reconcile
-against `response.usage` — it's the only authoritative source for billing.
+@mcp.tool()
+def fetch_url(url: str, max_length: int = 8000) -> str:
+    """Fetch and extract readable content from a URL."""
+    ...
 
-### CloudWatch Metrics (Auto-emitted, no extra cost)
+@mcp.tool()
+def search_aws_docs(query: str, service: str, profile: str = "001") -> str:
+    """Search AWS documentation and return structured results."""
+    ...
 
-| Metric | Source | Dimension |
-|--------|--------|-----------|
-| `InputTokenCount` | Bedrock namespace | ModelId |
-| `OutputTokenCount` | Bedrock namespace | ModelId |
-| `CacheReadInputTokens` | Bedrock namespace | ModelId |
-| `CacheWriteInputTokens` | Bedrock namespace | ModelId |
-| `InvocationLatency` | Bedrock namespace | ModelId |
-| `TimeToFirstToken` | Bedrock namespace | ModelId (streaming) |
-| `EstimatedTPMQuotaUsage` | Bedrock namespace | ModelId |
-| `Duration` | Lambda namespace | FunctionName |
-| `Errors` | Lambda namespace | FunctionName |
-| `Throttles` | Lambda namespace | FunctionName |
+@mcp.tool()
+def brave_search(query: str, count: int = 5) -> str:
+    """Search the web via Brave Search API."""
+    ...
 
-### CW Dashboard Widgets
+@mcp.tool()
+def github_search(query: str, language: str = "") -> str:
+    """Search GitHub repositories and code."""
+    ...
 
-| Widget | Metric Math / Source |
-|--------|---------------------|
-| Cost per run | `(InputTokenCount + OutputTokenCount) × per-token rate` |
-| Research runs per day | Count of DDB task entries |
-| Avg research duration | OTel root span duration |
-| MCP server latency (p50/p99) | Lambda Duration by FunctionName |
-| Token cache hit ratio | `CacheRead / (CacheRead + Input)` |
-| API budget utilization | DDB counter / monthly limit |
-| Model quota headroom | `EstimatedTPMQuotaUsage` vs service limit |
+@mcp.tool()
+def extract_feed(feed_url: str, max_entries: int = 10) -> str:
+    """Extract entries from an RSS/Atom blog feed."""
+    ...
 
-### Budget Alarms
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http")
+```
 
-| Alarm | Threshold | Action |
-|-------|-----------|--------|
-| Monthly Bedrock spend | Configurable ($) | SNS → email |
-| Brave API calls | 80% of 2K/month | CW alarm → WS notify user |
-| Tavily API calls | 80% of 1K/month | CW alarm → WS notify user |
-| Per-run token spike | > 200K tokens | Log + flag in DDB |
+### Why AgentSkills Plugin (not prompt stuffing)
+
+Skills use progressive disclosure — only metadata (~100 tokens per skill) is injected
+into the system prompt at startup. Full instructions load on-demand when the agent
+activates a skill via tool call. Resource files (references, scripts, assets) load
+individually as needed. This keeps context lean and prevents exceeding the model's
+context window.
+
+```python
+# Pre-processing Lambda — lightweight, fast
+from strands import Agent, AgentSkills
+plugin = AgentSkills(skills="/var/task/skills/")
+
+agent = Agent(
+    model=model,
+    plugins=[plugin],
+    tools=[s3_write],  # only needs to write contract to S3
+)
+
+# Agent Lambda — full research orchestration
+from strands import Agent, AgentSkills
+plugin = AgentSkills(skills="/var/task/skills/")
+
+agent = Agent(
+    model=model,
+    plugins=[plugin],
+    tools=[file_read, shell, mcp_tools, s3_read, s3_write, notify_ws],
+)
+```
+
+Skills packaged with both Lambda artifacts:
+```
+lambda-package/
+├── handler.py
+├── skills/
+│   ├── aws-deep-research/     # Main research skill
+│   │   ├── SKILL.md
+│   │   ├── agents/            # Sub-agent definitions
+│   │   └── references/        # Intent patterns, blog categories, etc.
+│   ├── frontend-design/       # Visual generation skill
+│   │   └── SKILL.md
+│   └── highcharts/            # Chart reference skill (optional)
+│       ├── SKILL.md
+│       └── references/
+└── requirements.txt
+```
+
+### Context Isolation via Sub-Agents (Pattern 3)
+
+The local skill's architecture rule — *"raw content NEVER enters the parent's context"* —
+is preserved using Strands SDK's Meta-Tool pattern. Each researcher runs as an isolated
+sub-agent within the same Lambda process:
+
+```
+Parent Agent (lean context ~4K tokens)
+  ├── sub-agent: aws-mcp-researcher     → calls MCP tools, writes aws-docs.md to S3
+  │                                       returns: "completed, 3 sources, 4.2KB written"
+  ├── sub-agent: web-content-researcher → calls MCP tools, writes web-content.md to S3
+  │                                       returns: "completed, 5 sources, 6.1KB written"
+  ├── sub-agent: github-researcher      → calls MCP tools, writes github-repos.md to S3
+  │                                       returns: "completed, 2 repos found, 2.8KB written"
+  ├── verify: check S3 file sizes (direct boto3 call)
+  ├── sub-agent: synthesizer            → reads all findings from S3, writes report to S3
+  │                                       returns: "report written, 12KB, 47 citations"
+  └── sub-agent: visual-generator       → reads report, uses frontend-design skill
+                                          returns: "visuals written to s3://.../visuals/"
+```
+
+Each sub-agent gets its own context window. Raw web pages, documentation text, and search
+results stay in the sub-agent's context and are discarded when it completes. The parent
+only receives concise summaries.
+
+## Data Flow
+
+```
+1. User submits query via React SPA
+
+2. POST /research → Pre-processing Lambda:
+   a. Activates aws-deep-research skill (progressive disclosure)
+   b. Classifies intent + strategy (Steps 1–3 of the skill)
+   c. Generates slug, writes research-contract.md → S3
+   d. Creates DynamoDB tracking record (slug, status: "planned", user, timestamp)
+   e. Simple query (1–2 entities):
+      → Invokes Agent Lambda asynchronously
+      → Returns { slug, status: "started", decomposition } to client
+   f. Complex query (3+ entities):
+      → Returns { slug, status: "pending_approval", decomposition, contract } to client
+      → Client displays contract for user review
+
+3. (Complex only) User reviews, optionally modifies contract, approves:
+   → Client PUTs updated contract to S3 (if modified)
+   → POST /research/{slug}/start → invokes Agent Lambda
+
+4. Agent Lambda (3–7 min):
+   a. Reads approved contract from S3
+   b. Connects WS, pushes: "research started, N subqueries across M sources"
+   c. Spawns 2–3 researcher sub-agents in parallel (Pattern 3)
+      - Each sub-agent connects to research-mcp-server on AgentCore Runtime
+      - Each sub-agent calls relevant MCP tools (fetch, search, etc.)
+      - Each sub-agent writes findings → S3
+   d. Verifies findings (checks S3 file sizes)
+   e. Pushes WS update: "findings verified, synthesizing..."
+   f. Spawns synthesizer sub-agent → reads S3 findings, writes report → S3
+   g. Spawns visual-generator sub-agent → reads report, generates HTML → S3
+   h. Pushes WS update: "complete" with report URL
+   i. Updates DynamoDB: status → "complete"
+
+5. CloudFront serves report at /reports/<slug>/
+```
+
+## WebSocket Progress
+
+The Agent Lambda pushes real-time updates to the client via API Gateway Management API.
+Any Lambda with the WebSocket endpoint URL and connection ID can push messages:
+
+```python
+apigw = boto3.client('apigatewaymanagementapi', endpoint_url=ws_endpoint)
+apigw.post_to_connection(
+    ConnectionId=connection_id,
+    Data=json.dumps({"type": "progress", "step": "researching", "detail": "..."})
+)
+```
+
+Progress events: `started` → `decomposed` → `researching` → `verified` → `synthesizing`
+→ `generating_visuals` → `complete`
 
 ## Cost Model (Per Research Run)
 
 | Component | Estimated Cost |
 |-----------|---------------|
-| AgentCore Runtime (1 agent, 5-7 min) | $0.02-0.04 |
-| Lambda MCP servers (~15 invocations) | $0.001-0.005 |
-| Bedrock tokens (Claude Sonnet) | $0.15-0.80 |
-| S3 + DynamoDB | < $0.01 |
-| OTel traces (within free tier) | $0.00 |
-| **Total per run** | **$0.17-0.85** |
+| Lambda pre-processing (~30s, 512MB) | ~$0.0004 |
+| Lambda agent (~5 min, 1024MB) | ~$0.005 |
+| AgentCore Runtime session (~15 tool calls) | ~$0.01–0.03 |
+| Bedrock model tokens (Claude Sonnet) | $0.15–0.80 |
+| S3 reads/writes | < $0.001 |
+| DynamoDB | < $0.001 |
+| **Total per run** | **$0.17–0.84** |
 | **Monthly idle cost** | **$0.00** |
 
-## Design Decisions & Rationale
+## Component Inventory
 
-### 1. Single Agent on AgentCore Runtime (not Lambda, not Step Functions)
+| Component | Count | Type |
+|-----------|-------|------|
+| Lambda functions | 5 | Pre-processing, Agent, WS $connect, WS $disconnect, Lambda Authorizer |
+| AgentCore Runtime | 1 | research-mcp-server (all tools) |
+| S3 buckets | 2 | Research artifacts, Static site (CloudFront) |
+| DynamoDB tables | 1 | research-tracking |
+| Secrets Manager secrets | 3 | BRAVE_API_KEY, TAVILY_API_KEY, GITHUB_TOKEN |
+| API Gateway | 1 | REST + WebSocket (same API) |
+| CloudFront distribution | 1 | Static site + report serving |
+| Cognito User Pool | 1 | Authentication |
 
-**Evaluated alternatives:**
-- **Lambda agents (14 functions + Step Functions):** Higher operational complexity (14 IAM roles, SFN state machine, inter-Lambda coordination). Cold starts add 3-8s. Lambda's 15-min timeout is tight for complex research.
-- **All-Lambda with Step Functions orchestration:** Clean separation but the agent's reasoning loop doesn't map well to a state machine. Step Functions can't do adaptive re-planning mid-research.
+## Mapping: Local Skill → Cloud
 
-**Why AgentCore Runtime wins:**
-- The local skill already works as a single parent agent dispatching sub-agents. AgentCore Runtime preserves this 1:1 — no architectural translation needed.
-- No timeout for async workloads (8-hour idle session). Research runs 3-7 min comfortably.
-- The agent IS the orchestrator. It can adaptively re-plan (e.g., dispatch an extra researcher if initial results are thin) — something Step Functions can't do without complex Choice states.
-- HealthyBusy signaling + async invoke pattern handles the ~500s API response timeout.
-
-### 2. Lambda MCP Servers (not AgentCore Gateway, not Fargate, not App Runner)
-
-**Evaluated alternatives:**
-- **AgentCore Gateway:** 50 TPS hard limit (all accounts), OAuth/resource policy complexity, VPC Lattice operational overhead, target sync issues. Overkill for internal agent→tool calls.
-- **Fargate:** No native scale-to-zero. Minimum idle cost ~$25/month for 5 services. Requires custom scale-to-zero automation.
-- **App Runner:** Minimum provisioned memory charge (~$0.007/hr idle × 5 = ~$25/month). No GPU, limited networking.
-
-**Why Lambda wins:**
-- Research tools are stateless, bursty, short-lived (1-15s per call). This is Lambda's sweet spot.
-- $0.00 idle cost. Pay only during the ~15 invocations per research run.
-- Direct Invoke (IAM-only) — no HTTP layer, no auth middleware, no gateway. Simplest possible integration.
-- 1000+ concurrent executions (vs Gateway's 50 TPS cap).
-
-### 3. Progressive Disclosure via AgentSkills Plugin (not prompt stuffing)
-
-**Evaluated alternatives:**
-- **Bake skill into system prompt:** Would consume 30-40KB+ if including all reference docs (frontend-design + highcharts + html-design). Exceeds context budget before research even starts.
-- **No skills — just hardcoded agent prompts:** Loses modularity, can't reuse skills across agents, maintenance burden.
-
-**Why AgentSkills plugin wins:**
-- ~100 tokens per skill at startup (metadata only). Full instructions loaded on-demand.
-- Resources (references/, scripts/) loaded incrementally — agent reads only what it needs for the specific task.
-- Same skill packages work locally (pi/Kiro) and in cloud (Runtime) — no duplication.
-- Pattern 3 (Meta-Tool) provides context isolation so skill execution doesn't pollute the parent's context.
-
-### 4. ADOT/OpenTelemetry (not X-Ray SDK)
-
-**Evaluated alternatives:**
-- **X-Ray SDK:** Enters maintenance mode Feb 2026, end-of-support Feb 2027. No new features. Vendor-specific instrumentation.
-
-**Why ADOT/OTel wins:**
-- Strands SDK has **native OpenTelemetry** built in (`strands-agents[otel]`). Zero-config tracing of agent loops, LLM calls, tools, and sub-agents.
-- ADOT Lambda Layer auto-instruments MCP server Lambdas without code changes.
-- Industry-standard protocol — traces are portable, not locked to AWS.
-- Still sends to CloudWatch backend (Application Signals, Transaction Search) — same visibility, future-proof instrumentation.
-- Free tier (100K traces/month) easily covers research workloads with sampling.
-
-### 5. Async Invoke + WebSocket (not synchronous request/response)
-
-**Evaluated alternatives:**
-- **Synchronous invoke:** Would hit ~500s API response timeout. Research takes 3-7 min.
-- **Polling endpoint:** Client polls `GET /status/{slug}` every N seconds. Works but wasteful and laggy.
-
-**Why async + WebSocket wins:**
-- Agent can run indefinitely (8-hour idle timeout) without API response pressure.
-- Real-time progress updates at every step (not just start/finish).
-- HealthyBusy signaling keeps container alive during long research.
-- Single boto3 call (`post_to_connection`) from the agent — no extra Lambda needed.
-
-### 6. Secrets Manager (not environment variables)
-
-**Evaluated alternatives:**
-- **Lambda env vars:** Hardcoded at deploy time. No rotation. Visible in console. No audit trail.
-- **SSM Parameter Store:** Cheaper but no automatic rotation, weaker encryption defaults.
-
-**Why Secrets Manager wins:**
-- Automatic rotation without redeployment (critical for API keys with expiration).
-- Fine-grained IAM policies — each Lambda only accesses the secrets it needs.
-- CloudTrail audit trail for every access.
-- 5-minute cache in Lambda execution context avoids per-invocation API calls.
-
-### 7. S3 for Artifacts (not DynamoDB, not EFS)
-
-**Why S3:**
-- Research artifacts (markdown files, HTML visuals) are document-sized (1-50KB). S3 is the natural fit.
-- Same `<slug>/` prefix pattern as the local `$WORK_DIR/<slug>/` directory.
-- Lifecycle policies for automatic archival (90 days → Glacier).
-- CloudFront serves reports directly from S3 — no rendering layer needed.
-- DynamoDB stores metadata/tracking only (small, structured, queryable).
-
-## Local → Cloud Mapping
-
-| Local (pi/Kiro) | Cloud (AgentCore Runtime) |
+| Local (pi/Kiro) | Cloud |
 |---|---|
-| Parent agent context | Runtime agent context |
-| `subagent dispatch` (pi/Kiro harness) | Strands Pattern 3 (Meta-Tool sub-agents) |
-| `$SKILL_DIR/scripts/*.py` | Lambda MCP servers |
-| `fetchv2` MCP server (local process) | `fetch-mcp` Lambda |
-| `$WORK_DIR/<slug>/` on filesystem | `s3://bucket/<slug>/` |
-| Terminal output | WebSocket push to React SPA |
+| Parent agent context | Lambda agent context |
+| `subagent dispatch` (harness) | Strands Pattern 3 (Meta-Tool sub-agents) |
+| `$SKILL_DIR/scripts/*.py` | `@mcp.tool()` in AgentCore Runtime |
+| `fetchv2` MCP server (local process) | `fetch_url` tool in Runtime |
+| `$WORK_DIR/<slug>/` on disk | `s3://bucket/<slug>/` |
 | `.env` file with API keys | Secrets Manager |
-| No observability | ADOT/OTel + CloudWatch + budget alarms |
+| Terminal output | WebSocket push to React SPA |
+| Skill references (on-disk reads) | Packaged in Lambda, read via `file_read` tool |
+
+## Research Pipeline Conventions
+
+These conventions are carried over from the local skill **without modification**.
+The cloud architecture MUST preserve them exactly — they ensure reproducibility,
+auditability, and consistent artifact naming across local and cloud runs.
+
+### Slug Naming (Step 2 of the skill)
+
+The slug identifies the research session on disk (locally) or in S3 (cloud).
+It names the work directory and the final report file.
+
+| Rule | Detail |
+|------|--------|
+| Length | 4–7 hyphen-separated words, 30–60 characters total |
+| Format | Lowercase letters, digits, hyphens only (kebab-case) |
+| Content | Must encode: primary service(s) + intent verb/dimension + scope qualifier |
+| Banned | No generic stopwords alone (`aws`, `guide`, `info`, `research`, `report`) |
+
+**Examples:**
+
+| Query | ❌ Too terse | ✅ Good slug |
+|-------|-------------|-------------|
+| How does DynamoDB handle hot partitions? | `dynamodb` | `dynamodb-hot-partitions-troubleshooting-patterns` |
+| Compare Bedrock vs Azure OpenAI for RAG | `bedrock-azure` | `bedrock-vs-azure-openai-enterprise-rag-comparison` |
+| Bedrock AgentCore overview | `agentcore` | `bedrock-agentcore-service-overview-capabilities` |
+
+**Validation before proceeding:**
+```bash
+token_count=$(echo "$slug" | tr '-' '\n' | wc -l)
+char_count=${#slug}
+# Reject if token_count < 4 or > 7, or char_count < 30 or > 60
+```
+
+**Cloud path:** `s3://research-bucket/<slug>/`
+
+### Query Decomposition (Step 3)
+
+Before dispatching sub-agents, the parent agent decomposes the query into
+2–3 subqueries per source using three strategies:
+
+1. **Faceted** — split by dimensions (features, pricing, limits, architecture)
+2. **Specificity** — broad + narrow variants of the same question
+3. **Synonyms** — alternate terminology for the same concept
+
+Each subquery is labeled with its facet name. The decomposition MUST be
+printed to the user (via WebSocket in cloud) before any API calls are made:
+
+```
+Dispatching web-content-researcher with:
+  [1] "DynamoDB hot partition detection strategies"   (facet: troubleshooting)
+  [2] "DynamoDB adaptive capacity auto-splitting"     (facet: mechanism)
+```
+
+This transparency rule is non-negotiable — it lets the user correct a bad
+decomposition before API credits are spent.
+
+### Research Contract (Step 1g)
+
+The research contract is a lightweight artifact that captures hard facts,
+entity constraints, and version requirements. It is written to
+`s3://research-bucket/<slug>/research-contract.md` before any research begins.
+
+**Format:**
+```markdown
+# Research Contract
+
+## Entity Constraints
+- **Include**: [specific services, models, versions to research]
+- **Exclude**: [older versions, competing services, out-of-scope topics]
+
+## Temporal Constraints
+- [Time period, recency requirements, "current pricing only", etc.]
+
+## Factual Anchors
+- [Key facts that must be verified before inclusion]
+- [Version-specific requirements for data points]
+
+## Labeling Rules
+- Data matching constraints → include as-is
+- Data for older/different versions → tag with ⚠️ and label actual version
+- Data with no version attribution → tag with "⚠️ version unspecified"
+```
+
+**When to ask the user to validate:**
+- **Complex** (3+ entities, version constraints) → show contract via WS, wait for confirmation
+- **Simple** (1–2 entities) → proceed silently
+
+**How it flows through the pipeline:**
+1. Parent writes contract → S3
+2. Every sub-agent reads `research-contract.md` as its FIRST action
+3. Researchers tag data that doesn't match entity/version constraints
+4. Synthesizer cross-validates every claim against the contract
+5. Mismatched data gets explicit ⚠️ labels in the final report
+
+### Subagent Task-Input Contract
+
+Every sub-agent dispatched by the parent MUST receive these fields:
+
+| Field | Cloud Equivalent | Example |
+|-------|-----------------|--------|
+| `SKILL_DIR` | Lambda `/var/task/skills/aws-deep-research/` | Skill root with references/ and agents/ |
+| `work-dir` | `s3://research-bucket/<slug>/` | Where findings files live |
+| `research-contract` | `s3://research-bucket/<slug>/research-contract.md` | First thing each sub-agent reads |
+| `original-query` | Passed from API request | Verbatim user question |
+| `query-type` | `aws` or `generic` | Shapes search depth |
+| `subqueries` | Facet-labeled strings | `[("query", "facet-name"), ...]` |
+| `findings-file` | `s3://research-bucket/<slug>/aws-docs.md` | Where sub-agent writes output |
+
+### Findings File Naming
+
+| Sub-Agent | Findings File | S3 Key |
+|-----------|--------------|--------|
+| aws-mcp-researcher | `aws-docs.md` (+ `aws-pricing.md`) | `<slug>/aws-docs.md` |
+| web-content-researcher | `web-content.md` | `<slug>/web-content.md` |
+| github-researcher | `github-repos.md` | `<slug>/github-repos.md` |
+| synthesizer | `<slug>-report.md` | `<slug>/<slug>-report.md` |
+| visual-generator | `visuals/index.html` | `<slug>/visuals/index.html` |
+
+### Findings Verification (Step 5)
+
+After each round of sub-agents completes, the parent verifies findings:
+
+```python
+for key in expected_findings_keys:
+    obj = s3.head_object(Bucket=bucket, Key=f"{slug}/{key}")
+    size = obj['ContentLength']
+    if size < 500:
+        status = "WEAK"   # flag for synthesizer
+    else:
+        status = "OK"
+```
+
+- `< 500 bytes` → treat as silent failure; passed to synthesizer as `WEAK`
+- `MISSING` → file doesn't exist; recorded in report's Gaps & Limitations
+- Parent NEVER reads findings file content — only checks size and existence
+
+### Final Report Naming & Delivery
+
+| Artifact | S3 Key | Served At |
+|----------|--------|-----------|
+| Report | `<slug>/<slug>-report.md` | `/reports/<slug>/report.md` |
+| Visuals | `<slug>/visuals/index.html` | `/reports/<slug>/visuals/` |
+| Contract | `<slug>/research-contract.md` | (internal, not served) |
+| Raw findings | `<slug>/*.md` | (internal, not served) |
+
+CloudFront serves the report directory at `/reports/<slug>/`. The final
+WebSocket notification includes the report URL:
+```json
+{
+  "type": "complete",
+  "slug": "bedrock-vs-azure-openai-enterprise-rag-comparison",
+  "reportUrl": "/reports/bedrock-vs-azure-openai-enterprise-rag-comparison/",
+  "reportSize": 12480,
+  "citations": 47
+}
+```
 
 ## Files
 
-- `architecture.svg` — Editable source diagram (Style 6: Claude Official)
-- `architecture.png` — Rendered 1920px output (retina)
+- `architecture.svg` — Source diagram (editable)
+- `architecture.png` — Rendered diagram (1920px retina)
