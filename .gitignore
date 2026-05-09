@@ -28,3 +28,4 @@ Thumbs.db
 .env.local
 
 docs/design/arch-review*.md
+tmp/
