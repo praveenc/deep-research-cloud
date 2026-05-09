@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude mcp *)",
+      "Read(//Users/pchamart/.agents/skills/aws-deep-research/**)",
+      "Read(//Users/pchamart/.agents/skills/**)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "awslabs.aws-iac-mcp-server",
+    "strands-agents",
+    "bedrock-agentcore-mcp-server",
+    "aws-mcp",
+    "fetchv2"
+  ]
+}
