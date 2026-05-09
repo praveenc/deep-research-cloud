@@ -20,6 +20,7 @@ Platform: linux/arm64, Port: 8080
 import os
 import json
 import logging
+import threading
 import concurrent.futures
 from strands import Agent
 from strands.models.bedrock import BedrockModel
@@ -148,17 +149,20 @@ def _create_researcher_agent() -> Agent:
         model=_create_model(),
         system_prompt=RESEARCHER_PROMPT,
         tools=[invoke_mcp_server, write_to_s3, read_from_s3],
-        max_turns=12,
     )
 
 
 def _create_synthesizer_agent() -> Agent:
-    """Create the synthesizer agent — reads findings, writes one report."""
+    """
+    Create the synthesizer agent — reads findings, writes one report.
+
+    Only has write_to_s3 tool. Once it writes the report, the model has
+    no other tools to call — it naturally terminates with end_turn.
+    """
     return Agent(
         model=_create_model(),
         system_prompt=SYNTHESIZER_PROMPT,
         tools=[write_to_s3],
-        max_turns=3,  # Read prompt + write report + stop. Never needs more.
     )
 
 
@@ -169,8 +173,7 @@ def step_1_decompose(query: str, depth: str) -> list[str]:
     agent = Agent(
         model=_create_model(),
         system_prompt=DECOMPOSER_PROMPT,
-        tools=[],  # No tools — pure LLM generation
-        max_turns=1,
+        tools=[],  # No tools — pure LLM generation, naturally terminates
     )
 
     num_questions = {'quick': 3, 'standard': 4, 'comprehensive': 5}.get(depth, 3)
@@ -201,6 +204,15 @@ def step_2_dispatch_researchers(slug: str, sub_questions: list[str], sources: li
         agent = _create_researcher_agent()
         findings_key = f"{slug}/findings/sub-{index:02d}.md"
 
+        # Watchdog: cancel agent if it runs too long (4 min per researcher)
+        def _watchdog():
+            agent.cancel()
+            logger.warning(f"Researcher {index} cancelled by watchdog")
+
+        watchdog = threading.Timer(240.0, _watchdog)
+        watchdog.daemon = True
+        watchdog.start()
+
         # Build source instruction
         source_tools = []
         if 'aws-docs' in sources:
@@ -228,8 +240,10 @@ Write your complete findings to S3 key: {findings_key}
 """
         try:
             agent(prompt)
+            watchdog.cancel()
             return {"index": index, "question": question, "status": "OK", "key": findings_key}
         except Exception as e:
+            watchdog.cancel()
             logger.error(f"Researcher {index} failed: {e}")
             return {"index": index, "question": question, "status": "FAILED", "error": str(e)}
 
@@ -282,6 +296,15 @@ def step_4_synthesize(slug: str, query: str, verified_results: list[dict]) -> st
     agent = _create_synthesizer_agent()
     report_key = f"{slug}/report.md"
 
+    # Watchdog: cancel synthesizer if it runs too long (3 min)
+    def _watchdog():
+        agent.cancel()
+        logger.warning("Synthesizer cancelled by watchdog")
+
+    watchdog = threading.Timer(180.0, _watchdog)
+    watchdog.daemon = True
+    watchdog.start()
+
     # Pre-read all findings and assemble into the prompt (like local skill)
     import boto3
     s3 = boto3.client('s3')
@@ -322,8 +345,10 @@ Write the final report to S3 with key: {report_key}
 
     try:
         agent(prompt)
+        watchdog.cancel()
         return report_key
     except Exception as e:
+        watchdog.cancel()
         logger.error(f"Synthesizer failed: {e}")
         return ""
 

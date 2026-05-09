@@ -223,30 +223,75 @@ The role also needs these baseline permissions (from AWS docs):
 
 ## 9. Agent Loop Prevention (Strands SDK)
 
-The Strands Agent has no default turn limit. If the orchestrator agent doesn't properly terminate (e.g., sub-agent dispatch returns but the orchestrator keeps trying), it will loop indefinitely — burning tokens and time.
+**The Strands `Agent` class does NOT have a `max_turns` or `max_iterations` constructor parameter.** Don't try to pass one — it will raise `TypeError: Agent.__init__() got an unexpected keyword argument 'max_turns'`.
 
-### Fix: Set `max_turns` on the Agent
+### Actual `Agent` constructor parameters (relevant ones)
 
 ```python
-agent = Agent(
-    model=model,
-    system_prompt=SYSTEM_PROMPT,
+Agent(
+    model=...,
+    messages=...,
     tools=[...],
-    max_turns=30,  # Hard limit — prevents infinite loops
+    system_prompt="...",
+    callback_handler=...,
+    conversation_manager=...,
+    hooks=[...],
+    retry_strategy=...,
+    # ... no max_turns, no max_iterations
 )
 ```
 
-### Fix: Explicit stop conditions in the system prompt
+### How to actually limit iteration
 
-Tell the agent when to STOP making tool calls:
+1. **Restrict the tool set** — fewer tools = less to loop on. The synthesizer should only have `write_to_s3` so once it writes, the model has nothing else to call and naturally returns `end_turn`.
+
+2. **Directive system prompts** — explicitly tell the model when to stop:
+   ```
+   IMPORTANT: After writing the report, STOP. Do not make any more tool calls.
+   ```
+
+3. **Watchdog cancellation** — the SDK provides `agent.cancel()` for external termination:
+   ```python
+   import threading
+
+   agent = Agent(...)
+
+   def _watchdog():
+       agent.cancel()
+
+   watchdog = threading.Timer(240.0, _watchdog)  # 4 minutes
+   watchdog.daemon = True
+   watchdog.start()
+
+   try:
+       result = agent(prompt)
+       watchdog.cancel()  # Cancel timer if completed normally
+   except Exception:
+       watchdog.cancel()
+       raise
+   ```
+
+4. **Hooks** — register hooks to count iterations and call `agent.cancel()` programmatically.
+
+### The deeper architectural lesson
+
+The local `aws-deep-research` skill is **deterministic** — it's a markdown SKILL that Claude follows step by step, not an agent loop. There's no LLM-controlled "figure out when to stop" logic.
+
+When translating a skill to a cloud agent, **don't give one LLM the entire workflow with all the tools and hope it terminates**. Instead, structure the orchestrator as:
+
+```python
+# Python code (deterministic) drives the workflow
+sub_questions = step_1_decompose(query)        # bounded LLM call
+results = step_2_dispatch_researchers(...)     # ThreadPoolExecutor of bounded LLM calls
+verified = step_3_verify_findings(...)         # pure Python, no LLM
+report = step_4_synthesize(...)                # bounded LLM call with all findings pre-assembled
 ```
-IMPORTANT: After run_synthesizer completes successfully, you are DONE.
-Do NOT make any more tool calls. Return your final message immediately.
-```
+
+Each step uses the LLM for what it's good at (text understanding/generation) within a bounded scope. Python handles control flow.
 
 ### Observed symptom
 
-The agent writes findings to S3 (sub-agents work), but then the orchestrator keeps calling `dispatch_sub_agents` or `invoke_mcp_server` repeatedly because it doesn't recognize that the workflow is complete.
+With a single LLM-controlled orchestrator + many tools, the agent writes findings to S3 successfully but then loops — calling `dispatch_sub_agents` repeatedly or hitting MCP tools long after the workflow should have ended. The model interprets gaps in findings as reasons to research more, with no hard stop.
 
 ---
 
