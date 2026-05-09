@@ -75,7 +75,7 @@ deep-research-cloud/
 
 ### AWS Account Setup
 
-1. **Bedrock model access** — Enable `anthropic.claude-sonnet-4-20250514` in your account (us-west-2)
+1. **Bedrock model access** — Enable `us.anthropic.claude-opus-4-6-v1` (cross-region inference profile) in your account (us-west-2)
 2. **AgentCore Runtime** — Ensure Bedrock AgentCore is available in your region
 3. **Service quotas** — Default limits are fine for dev (25 TPS per agent)
 
@@ -276,7 +276,7 @@ pip install -r requirements.txt
 
 # Set env vars
 export AWS_REGION=us-west-2
-export BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-20250514
+export BEDROCK_MODEL_ID=us.anthropic.claude-opus-4-6-v1
 export RESEARCH_BUCKET=my-test-bucket
 export TRACKING_TABLE=my-test-table
 

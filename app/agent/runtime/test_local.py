@@ -27,7 +27,7 @@ from datetime import datetime
 # Configure environment for local testing
 os.environ.setdefault('STAGE', 'local')
 os.environ.setdefault('AWS_REGION', 'us-west-2')
-os.environ.setdefault('BEDROCK_MODEL_ID', 'anthropic.claude-sonnet-4-20250514')
+os.environ.setdefault('BEDROCK_MODEL_ID', 'us.anthropic.claude-opus-4-6-v1')
 os.environ.setdefault('RESEARCH_BUCKET', 'deep-research-local-test')
 os.environ.setdefault('TRACKING_TABLE', 'deep-research-tracking-local')
 os.environ.setdefault('CONNECTIONS_TABLE', 'deep-research-connections-local')
