@@ -29,3 +29,8 @@ Thumbs.db
 
 docs/design/arch-review*.md
 tmp/
+
+# Pre-processing Lambda local-test artifacts
+app/preprocess/.venv/
+app/preprocess/.preprocess-out/
+app/preprocess/__pycache__/
