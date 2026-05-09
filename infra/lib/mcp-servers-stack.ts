@@ -99,7 +99,7 @@ export class McpServersStack extends cdk.Stack {
         ...commonEnv,
         OTEL_SERVICE_NAME: 'brave-mcp',
         SECRET_ARN: props.secretArn,
-        SECRET_KEY_NAME: 'BRAVE_API_KEY',
+        SECRET_KEY_NAME: 'BRAVE_SEARCH_API_KEY',
       },
     });
     // Grant only this Lambda access to the secret

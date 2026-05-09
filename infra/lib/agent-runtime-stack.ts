@@ -51,15 +51,14 @@ export class AgentRuntimeStack extends cdk.Stack {
 
     // Bedrock model invocation (Converse API)
     executionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'BedrockModelInvocation',
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/${props.config.bedrockModelId}`,
-        // Allow cross-region inference profiles if needed
+        // Cross-region inference profiles route to foundation models in any region
+        'arn:aws:bedrock:*::foundation-model/*',
         `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
       ],
     }));
@@ -74,13 +73,14 @@ export class AgentRuntimeStack extends cdk.Stack {
     props.connectionsTable.grantReadData(executionRole);
 
     // Lambda: Invoke MCP servers (Direct Invoke via IAM)
-    Object.values(props.mcpFunctions).forEach(fn => {
-      fn.grantInvoke(executionRole);
-    });
+    executionRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: Object.values(props.mcpFunctions).map(fn => fn.functionArn),
+    }));
 
     // Secrets Manager: Read API keys for MCP servers
     executionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SecretsManagerRead',
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:GetSecretValue'],
       resources: [props.secretArn],
@@ -88,7 +88,6 @@ export class AgentRuntimeStack extends cdk.Stack {
 
     // API Gateway: Post to WebSocket connections (progress push)
     executionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'WebSocketPost',
       effect: iam.Effect.ALLOW,
       actions: ['execute-api:ManageConnections'],
       resources: [
@@ -98,7 +97,6 @@ export class AgentRuntimeStack extends cdk.Stack {
 
     // CloudWatch: Emit custom metrics (token usage, cost)
     executionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'CloudWatchMetrics',
       effect: iam.Effect.ALLOW,
       actions: ['cloudwatch:PutMetricData'],
       resources: ['*'],

@@ -63,29 +63,41 @@ export class ApiStack extends cdk.Stack {
     // Thin Lambda that validates the request and async-invokes AgentCore Runtime
     const invokerHandler = new lambda.Function(this, 'InvokerHandler', {
       functionName: `deep-research-invoker-${props.config.stage}`,
-      description: 'Validates research request, writes task to DDB, async-invokes AgentCore Runtime',
+      description: 'Validates research request, writes task to DDB, async self-invokes to call AgentCore Runtime',
       runtime: lambda.Runtime.PYTHON_3_13,
       architecture: lambda.Architecture.ARM_64,
       handler: 'handler.lambda_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../app/agent/invoker')),
-      timeout: cdk.Duration.seconds(15),
+      timeout: cdk.Duration.minutes(15), // Async worker mode needs full 15 min for AgentCore call
       memorySize: 256,
       environment: {
         STAGE: props.config.stage,
         TRACKING_TABLE: props.trackingTable.tableName,
         RESEARCH_BUCKET: props.researchBucket.bucketName,
-        // AGENT_RUNTIME_ID is set post-deploy via SSM or env update
-        AGENT_RUNTIME_ID: '', // Populated after AgentRuntimeStack deploys
+        // Set post-deploy via: aws lambda update-function-configuration
+        // Value: arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtimeId>
+        AGENT_RUNTIME_ARN: '',
       },
     });
 
     // Invoker permissions
-    props.trackingTable.grantWriteData(invokerHandler);
+    props.trackingTable.grantReadWriteData(invokerHandler);
+
+    // Allow invoker to async-invoke itself (for long-running AgentCore calls)
+    invokerHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'SelfInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [`arn:aws:lambda:${this.region}:${this.account}:function:deep-research-invoker-${props.config.stage}`],
+    }));
+
     invokerHandler.addToRolePolicy(new iam.PolicyStatement({
       sid: 'InvokeAgentRuntime',
       effect: iam.Effect.ALLOW,
-      actions: ['bedrock-agentcore:InvokeRuntime'],
-      resources: ['*'], // Scoped after runtime ARN is known
+      actions: [
+        'bedrock-agentcore:InvokeAgentRuntime',
+      ],
+      resources: ['*'],
     }));
 
     // Status handler — reads task status from DynamoDB

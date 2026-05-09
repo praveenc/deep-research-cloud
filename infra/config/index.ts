@@ -28,7 +28,7 @@ export const devConfig: DeepResearchConfig = {
   env: { account, region },
   secretArn: `arn:aws:secretsmanager:${region}:${account}:secret:prod/deepresearch/Search`,
   stage: 'dev',
-  bedrockModelId: 'anthropic.claude-sonnet-4-20250514',
+  bedrockModelId: 'us.anthropic.claude-sonnet-4-6',
   monthlyBudgetAlarmUsd: 50,
   alarmEmail: undefined, // Set to receive alarm notifications
 };
@@ -37,7 +37,7 @@ export const prodConfig: DeepResearchConfig = {
   env: { account, region },
   secretArn: `arn:aws:secretsmanager:${region}:${account}:secret:prod/deepresearch/Search`,
   stage: 'prod',
-  bedrockModelId: 'anthropic.claude-sonnet-4-20250514',
+  bedrockModelId: 'us.anthropic.claude-sonnet-4-6',
   monthlyBudgetAlarmUsd: 200,
   alarmEmail: undefined,
 };

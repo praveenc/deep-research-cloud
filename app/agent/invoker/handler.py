@@ -1,15 +1,19 @@
 """
 Invoker Lambda — validates research request, creates DDB task record,
-and async-invokes the AgentCore Runtime agent.
+and fires off the AgentCore Runtime invocation asynchronously.
 
 POST /research
 {
   "query": "Compare SageMaker vs Bedrock for RAG workloads",
   "options": {
-    "depth": "comprehensive",  // "quick" | "standard" | "comprehensive"
-    "sources": ["aws-docs", "web", "github"]  // optional filter
+    "depth": "comprehensive",
+    "sources": ["aws-docs", "web", "github"]
   }
 }
+
+AgentCore invocation is synchronous (blocks until agent completes), so we
+invoke ourselves asynchronously via Lambda's Event invocation type to handle
+the long-running AgentCore call without blocking the API Gateway response.
 """
 import json
 import os
@@ -22,29 +26,44 @@ from datetime import datetime, timezone
 
 TRACKING_TABLE = os.environ['TRACKING_TABLE']
 RESEARCH_BUCKET = os.environ['RESEARCH_BUCKET']
-AGENT_RUNTIME_ID = os.environ.get('AGENT_RUNTIME_ID', '')
 STAGE = os.environ.get('STAGE', 'dev')
 
 dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table(TRACKING_TABLE)
-# AgentCore Runtime client — will use when GA
-# agentcore_client = boto3.client('bedrock-agent-runtime')
+lambda_client = boto3.client('lambda')
+
+# Lazy-init: bedrock-agentcore client
+_agentcore_client = None
+
+
+def _get_agentcore_client():
+    global _agentcore_client
+    if _agentcore_client is None:
+        _agentcore_client = boto3.client('bedrock-agentcore')
+    return _agentcore_client
 
 
 def generate_slug(query: str) -> str:
     """Generate a URL-safe slug from the research query."""
-    # Normalize and truncate
     slug = re.sub(r'[^a-z0-9\s-]', '', query.lower().strip())
     slug = re.sub(r'[\s-]+', '-', slug)[:60]
-    # Append short hash for uniqueness
     hash_suffix = hashlib.sha256(f"{query}{time.time()}".encode()).hexdigest()[:8]
     return f"{slug}-{hash_suffix}"
 
 
 def lambda_handler(event, context):
-    """Handle POST /research — create task and invoke agent."""
+    """
+    Dual-mode handler:
+    - API Gateway event (has 'httpMethod'): validate request, write task, async self-invoke
+    - Async event (has 'action': 'invoke_agent'): call AgentCore synchronously
+    """
+
+    # ─── Mode 2: Async worker — invoke AgentCore (long-running) ──────
+    if event.get('action') == 'invoke_agent':
+        return _handle_agent_invocation(event)
+
+    # ─── Mode 1: API Gateway — fast path (validate + DDB + return 202) ─
     try:
-        # Parse request body
         body = json.loads(event.get('body', '{}'))
         query = body.get('query', '').strip()
 
@@ -86,7 +105,7 @@ def lambda_handler(event, context):
         }
         table.put_item(Item=task_record)
 
-        # Also write a status-index entry for active queries
+        # Status index entry
         table.put_item(Item={
             'pk': f"{user_id}#{slug}",
             'sk': 'status',
@@ -96,18 +115,30 @@ def lambda_handler(event, context):
             'userId': user_id,
         })
 
-        # TODO: Async invoke AgentCore Runtime
-        # When AgentCore SDK stabilizes, this will call:
-        # agentcore_client.invoke_agent_runtime(
-        #     agentRuntimeId=AGENT_RUNTIME_ID,
-        #     inputText=json.dumps({
-        #         'query': query,
-        #         'slug': slug,
-        #         'userId': user_id,
-        #         'depth': depth,
-        #         'sources': sources,
-        #     }),
-        # )
+        # ─── Async self-invoke for the long-running AgentCore call ────
+        # InvocationType='Event' returns immediately (202) and Lambda
+        # runs the handler again with the agent invocation payload.
+        agent_runtime_arn = os.environ.get('AGENT_RUNTIME_ARN', '')
+
+        if agent_runtime_arn:
+            async_payload = json.dumps({
+                'action': 'invoke_agent',
+                'agentRuntimeArn': agent_runtime_arn,
+                'runtimeSessionId': task_id,  # UUID = 36 chars (>33 required)
+                'query': query,
+                'slug': slug,
+                'userId': user_id,
+                'depth': depth,
+                'sources': sources,
+            })
+
+            lambda_client.invoke(
+                FunctionName=context.function_name,
+                InvocationType='Event',  # Async — returns immediately
+                Payload=async_payload.encode('utf-8'),
+            )
+        else:
+            print(f"WARNING: AGENT_RUNTIME_ARN not set. Task {slug} will remain PENDING.")
 
         return _response(202, {
             'taskId': task_id,
@@ -122,6 +153,64 @@ def lambda_handler(event, context):
     except Exception as e:
         print(f"Error: {e}")
         return _response(500, {'error': 'Internal server error'})
+
+
+def _handle_agent_invocation(event):
+    """
+    Async worker: invokes AgentCore Runtime synchronously.
+    This runs in a separate Lambda invocation (InvocationType='Event')
+    so it doesn't block the API Gateway response.
+    """
+    agent_runtime_arn = event['agentRuntimeArn']
+    runtime_session_id = event['runtimeSessionId']
+    slug = event['slug']
+    user_id = event['userId']
+
+    invoke_payload = json.dumps({
+        'query': event['query'],
+        'slug': slug,
+        'userId': user_id,
+        'depth': event['depth'],
+        'sources': event['sources'],
+    })
+
+    try:
+        print(f"Invoking AgentCore: arn={agent_runtime_arn}, session={runtime_session_id}")
+
+        client = _get_agentcore_client()
+        response = client.invoke_agent_runtime(
+            agentRuntimeArn=agent_runtime_arn,
+            runtimeSessionId=runtime_session_id,
+            payload=invoke_payload.encode('utf-8'),
+        )
+
+        # Read the response
+        response_body = response.get('response', b'')
+        if hasattr(response_body, 'read'):
+            response_body = response_body.read()
+        if isinstance(response_body, bytes):
+            response_body = response_body.decode('utf-8', errors='replace')
+
+        print(f"AgentCore completed: slug={slug}, response_len={len(response_body)}")
+        return {'status': 'COMPLETE', 'slug': slug}
+
+    except Exception as e:
+        print(f"AgentCore invoke error: {e}")
+        # Mark task as FAILED
+        table.update_item(
+            Key={'pk': f"{user_id}#{slug}", 'sk': 'meta'},
+            UpdateExpression='SET #s = :s, #e = :e',
+            ExpressionAttributeNames={'#s': 'status', '#e': 'error'},
+            ExpressionAttributeValues={':s': 'FAILED', ':e': str(e)},
+        )
+        # Also update status index
+        table.update_item(
+            Key={'pk': f"{user_id}#{slug}", 'sk': 'status'},
+            UpdateExpression='SET #s = :s',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={':s': 'FAILED'},
+        )
+        return {'status': 'FAILED', 'slug': slug, 'error': str(e)}
 
 
 def _response(status_code: int, body: dict) -> dict:

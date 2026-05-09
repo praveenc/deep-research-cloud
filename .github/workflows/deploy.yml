@@ -1,0 +1,126 @@
+name: Deploy Deep Research Cloud
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-west-2
+  CDK_DEFAULT_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ─── Lint & Synth (runs on every PR and push) ────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: npm ci
+
+      - name: TypeScript compile check
+        working-directory: infra
+        run: npx tsc --noEmit
+
+      - name: CDK Synth
+        working-directory: infra
+        run: npx cdk synth --quiet
+
+      - name: CDK Diff (PR only)
+        if: github.event_name == 'pull_request'
+        working-directory: infra
+        run: npx cdk diff --no-color 2>&1 | head -200
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # ─── Build Frontend ─────────────────────────────────────────────
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app/frontend
+        run: npm ci
+
+      - name: Build SPA
+        working-directory: app/frontend
+        run: npm run build
+        env:
+          VITE_USER_POOL_ID: ${{ vars.USER_POOL_ID }}
+          VITE_USER_POOL_CLIENT_ID: ${{ vars.USER_POOL_CLIENT_ID }}
+          VITE_API_URL: ${{ vars.API_URL }}
+          VITE_WS_URL: ${{ vars.WS_URL }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/frontend/dist/
+
+  # ─── Deploy (only on push to main) ──────────────────────────────
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate, build-frontend]
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: infra/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/frontend/dist/
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: npm ci
+
+      - name: Deploy all stacks
+        working-directory: infra
+        run: npx cdk deploy --all --require-approval never --ci
+
+      - name: Output stack URLs
+        working-directory: infra
+        run: |
+          echo "## Deployment Outputs" >> $GITHUB_STEP_SUMMARY
+          aws cloudformation describe-stacks \
+            --query 'Stacks[?starts_with(StackName, `DeepResearch-`)].Outputs[].[OutputKey, OutputValue]' \
+            --output table >> $GITHUB_STEP_SUMMARY
