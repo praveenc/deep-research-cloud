@@ -22,6 +22,7 @@ import uuid
 import hashlib
 import re
 import boto3
+from botocore.config import Config
 from datetime import datetime, timezone
 
 TRACKING_TABLE = os.environ['TRACKING_TABLE']
@@ -37,9 +38,24 @@ _agentcore_client = None
 
 
 def _get_agentcore_client():
+    """
+    Build a bedrock-agentcore client tuned for long-running invocations.
+
+    invoke_agent_runtime() is synchronous and can block for many minutes
+    while the agent works. The boto3 default 60s read_timeout will cause
+    retries that spawn duplicate parallel invocations — we MUST disable
+    them and bump the timeout.
+    """
     global _agentcore_client
     if _agentcore_client is None:
-        _agentcore_client = boto3.client('bedrock-agentcore')
+        _agentcore_client = boto3.client(
+            'bedrock-agentcore',
+            config=Config(
+                connect_timeout=10,
+                read_timeout=900,  # 15 min — longer than any research run
+                retries={'max_attempts': 1, 'mode': 'standard'},  # No retries
+            ),
+        )
     return _agentcore_client
 
 

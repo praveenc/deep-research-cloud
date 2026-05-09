@@ -24,6 +24,7 @@ import threading
 import concurrent.futures
 from strands import Agent
 from strands.models.bedrock import BedrockModel
+from botocore.config import Config as BotocoreConfig
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 from tools import (
@@ -136,10 +137,23 @@ Do NOT make any more tool calls after writing the report.
 # ─── Agent Factory ────────────────────────────────────────────────────
 
 def _create_model():
-    """Create a Bedrock model instance."""
+    """
+    Create a Bedrock model instance configured for long-running synthesis.
+
+    Strands' BedrockModel defaults to read_timeout=120s, which is not
+    enough for the synthesizer generating a 3-6K word report. We override
+    with a 600s timeout and disable retries (we handle errors at the step
+    level, not the model call level).
+    """
+    boto_config = BotocoreConfig(
+        connect_timeout=10,
+        read_timeout=600,  # 10 min — long enough for any single LLM call
+        retries={'max_attempts': 2, 'mode': 'standard'},
+    )
     return BedrockModel(
         model_id=BEDROCK_MODEL_ID,
         region_name=os.environ.get('AWS_REGION', 'us-west-2'),
+        boto_client_config=boto_config,
     )
 
 
@@ -296,12 +310,12 @@ def step_4_synthesize(slug: str, query: str, verified_results: list[dict]) -> st
     agent = _create_synthesizer_agent()
     report_key = f"{slug}/report.md"
 
-    # Watchdog: cancel synthesizer if it runs too long (3 min)
+    # Watchdog: cancel synthesizer if it runs too long (10 min)
     def _watchdog():
         agent.cancel()
         logger.warning("Synthesizer cancelled by watchdog")
 
-    watchdog = threading.Timer(180.0, _watchdog)
+    watchdog = threading.Timer(600.0, _watchdog)
     watchdog.daemon = True
     watchdog.start()
 
