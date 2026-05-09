@@ -92,7 +92,7 @@ Each is a standalone Python handler receiving MCP JSON-RPC `tools/call` events:
 
 - Environment config: `infra/config/index.ts` (region, model ID, budget thresholds)
 - Secrets: `prod/deepresearch/Search` in Secrets Manager (BRAVE_API_KEY, GITHUB_TOKEN)
-- Default model: `us.anthropic.claude-sonnet-4-6` (cross-region inference profile)
+- Default model: `us.anthropic.claude-opus-4-6-v1` (cross-region inference profile)
 - Default region: `us-west-2`
 
 ## Key Dependencies

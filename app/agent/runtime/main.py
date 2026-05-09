@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Environment configuration
 STAGE = os.environ.get('STAGE', 'dev')
-BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-6')
+BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'us.anthropic.claude-opus-4-6-v1')
 RESEARCH_BUCKET = os.environ.get('RESEARCH_BUCKET', '')
 TRACKING_TABLE = os.environ.get('TRACKING_TABLE', '')
 CONNECTIONS_TABLE = os.environ.get('CONNECTIONS_TABLE', '')

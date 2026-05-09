@@ -52,7 +52,7 @@ RESEARCH_BUCKET = os.environ.get("RESEARCH_BUCKET", "")
 TRACKING_TABLE = os.environ.get("TRACKING_TABLE", "")
 AGENT_LAMBDA_NAME = os.environ.get("AGENT_LAMBDA_NAME", "")
 BEDROCK_MODEL_ID = os.environ.get(
-    "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
+    "BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-6-v1"
 )
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 STAGE = os.environ.get("STAGE", "dev")

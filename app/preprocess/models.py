@@ -15,6 +15,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+def _none_to_list(v):
+    """Coerce None -> [] so models that emit null for empty optional lists pass validation."""
+    return [] if v is None else v
+
+
 # ── Step 1a: 12 intents (drives default subagent set) ──────────────────
 Intent = Literal[
     "service-overview",
@@ -104,6 +109,15 @@ class ContractData(BaseModel):
         description="Additional ⚠️-style labeling rules beyond the defaults.",
     )
 
+    _coerce_lists = field_validator(
+        "entity_includes",
+        "entity_excludes",
+        "temporal_constraints",
+        "factual_anchors",
+        "extra_labeling_rules",
+        mode="before",
+    )(_none_to_list)
+
 
 class PreprocessResult(BaseModel):
     """The full structured output of the Pre-processing Lambda.
@@ -141,6 +155,14 @@ class PreprocessResult(BaseModel):
 
     # One-line rationale for the CloudWatch log
     rationale: str = Field(min_length=10, max_length=400)
+
+    _coerce_lists = field_validator(
+        "intents",
+        "subagents",
+        "blog_categories",
+        "direct_urls",
+        mode="before",
+    )(_none_to_list)
 
     # ── Validators that mirror the skill's hard rules ──────────────────
 
