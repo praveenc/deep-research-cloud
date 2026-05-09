@@ -85,6 +85,14 @@ class Decomposition(BaseModel):
     agentcore_researcher: list[Subquery] = []
     github_researcher: list[Subquery] = []
 
+    _coerce_lists = field_validator(
+        "aws_mcp_researcher",
+        "web_content_researcher",
+        "agentcore_researcher",
+        "github_researcher",
+        mode="before",
+    )(_none_to_list)
+
 
 class ContractData(BaseModel):
     """Step 1g — fields needed to build research-contract.md."""
