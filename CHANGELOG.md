@@ -32,6 +32,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/)
 - **Global pi subagents** for shared CDK workflows: `cdk.ops`,
   `cdk.review`, and a generic `aws-docs` documentation lookup agent
   (auto-routes between AWS Knowledge MCP and Bedrock AgentCore MCP).
+- **Project pi subagent** `repo-docs-keeper`
+  (`.pi/agents/repo-docs-keeper.md`) that maintains `CHANGELOG.md`,
+  `PROGRESS_LOG.md`, and `AGENTS.md` per repo conventions. Read-only
+  on git/gh; discovers changes via `gh pr view` / `git log` inside
+  `my-git-workspace`. AGENTS.md gains a "Project subagents" section
+  documenting it alongside the user-scoped helpers.
 
 ### Changed
 - **Default LLM** unified to `us.anthropic.claude-opus-4-6-v1`
