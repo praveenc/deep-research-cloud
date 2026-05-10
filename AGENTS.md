@@ -224,6 +224,31 @@ locally and stop.
   verifies them via S3 metadata only (size/existence). Sub-agents own
   their context windows.
 
+## Project subagents
+
+The repo ships one project-scoped pi subagent under `.pi/agents/` for
+context-efficient bookkeeping work:
+
+- **`repo-docs-keeper`** — maintains `CHANGELOG.md`, `PROGRESS_LOG.md`,
+  and `AGENTS.md` in the project's conventions. Given a short pointer
+  (e.g. "PRs #2, #3 merged" or "working tree only"), it discovers what
+  actually changed via `gh pr view` / `git log` inside the
+  `my-git-workspace` container, then appends entries surgically. It is
+  read-only on git — the calling agent owns commits and pushes.
+
+  Invoke from a parent agent with:
+  ```ts
+  subagent({
+    agent: "repo-docs-keeper",
+    task: "PRs #5 and #6 just merged. Update CHANGELOG and PROGRESS_LOG."
+  })
+  ```
+
+User-scoped pi subagents that pair well with this repo (provided by the
+user, not checked in): `git-commits-docker` (commit-only, container-aware),
+`cdk.ops` / `cdk.review` (CDK lifecycle + IaC review), `aws-docs` (AWS +
+AgentCore docs lookup via MCP).
+
 ## Documentation MCP servers
 
 When working in this repo, prefer authoritative documentation lookups
