@@ -37,7 +37,7 @@ User → CloudFront (React SPA)
                • Embeds `uvx` to spawn upstream awslabs.* MCP servers as
                  stdio subprocesses (aws-pricing, agentcore-docs, github)
                • AWS docs route directly to the remote AWS Knowledge MCP
-                 endpoint (no Runtime hop) via SigV4
+                 endpoint (no Runtime hop) over Streamable HTTP
                • Reads API keys from Secrets Manager
            → S3 (artifacts) + DynamoDB (tracking) + Secrets Manager (keys)
 ```
@@ -50,7 +50,7 @@ User → CloudFront (React SPA)
 | API | API Gateway (REST + WS) | Auth (Cognito JWT), routing, real-time WebSocket progress |
 | Pre-process | **Lambda** (Strands SDK) | 1–2 LLM calls: intent, strategy, decompose, slug, research contract → S3 |
 | Agent | **Lambda** (Strands SDK) | Orchestrates research — dispatch sub-agents, verify, synthesize, generate visuals |
-| MCP Tools | **AgentCore Runtime** (FastMCP) | Hosts 4 custom tools (fetch, brave, tavily, feeds) and embeds `uvx` to spawn upstream awslabs.* MCP servers (pricing, agentcore, github) as subprocesses; AWS docs route directly to AWS Knowledge MCP via SigV4 |
+| MCP Tools | **AgentCore Runtime** (FastMCP) | Hosts 4 custom tools (fetch, brave, tavily, feeds) and embeds `uvx` to spawn upstream awslabs.* MCP servers (pricing, agentcore, github) as subprocesses; AWS docs route directly to the remote AWS Knowledge MCP at `https://knowledge-mcp.global.api.aws` |
 | Skills | Packaged with both Lambdas | `aws-deep-research` + `frontend-design` — loaded via progressive disclosure |
 | Data | S3 | Research artifacts: `s3://bucket/<slug>/` — contract, findings, report, visuals |
 | Data | DynamoDB | Task tracking, API budget per user, WebSocket connection IDs |
@@ -103,8 +103,9 @@ tool sub-agents will reach for. AgentCore Runtime provides:
 
 The local `aws-deep-research` skill's "MCP servers" are mostly thin
 clients that spawn upstream `awslabs.*-mcp-server@latest` packages via
-`uvx`/stdio, or call the remote **AWS Knowledge MCP** endpoint at
-`https://aws-mcp.us-east-1.api.aws/mcp` over HTTPS + SigV4. We do NOT
+`uvx`/stdio, or call the remote **AWS Knowledge MCP** server at
+`https://knowledge-mcp.global.api.aws` (GA, Streamable HTTP, rate-limited
+but unauthenticated). We do NOT
 reimplement any of those — we wrap them.
 
 | Tool | Source | How the FastMCP server exposes it |
@@ -113,7 +114,7 @@ reimplement any of those — we wrap them.
 | `brave_search` | **custom** REST wrapper | `@mcp.tool()` directly |
 | `tavily_search` | **custom** REST wrapper | `@mcp.tool()` directly |
 | `extract_feed` | **custom** RSS/Atom parser | `@mcp.tool()` directly |
-| `search_aws_docs` | upstream **AWS Knowledge MCP** (remote HTTPS) | proxied through to `aws-mcp.us-east-1.api.aws/mcp` with SigV4 — no local code |
+| `search_documentation` / `read_documentation` / `recommend` / `list_regions` / `get_regional_availability` / `retrieve_skill` | upstream **AWS Knowledge MCP** (remote, GA) | forwarded to `https://knowledge-mcp.global.api.aws` over Streamable HTTP — no local code, no auth needed |
 | `aws_pricing` | upstream `awslabs.aws-pricing-mcp-server@latest` | spawned in-container via `uvx`, exposed as forwarded MCP tools |
 | `agentcore_search` | upstream `awslabs.amazon-bedrock-agentcore-mcp-server@latest` | same — `uvx` stdio subprocess |
 | `github_search` | upstream `awslabs.git-repo-research-mcp-server@latest` | same — `uvx` stdio subprocess |
@@ -153,8 +154,9 @@ def extract_feed(feed_url: str, max_entries: int = 10) -> str:
 # `uvx awslabs.amazon-bedrock-agentcore-mcp-server@latest`, and
 # `uvx awslabs.git-repo-research-mcp-server@latest` as long-lived stdio
 # children, then forward their `tools/list` and `tools/call` traffic.
-# The AWS Knowledge MCP is a remote HTTPS endpoint — forwarded over MCP
-# Streamable HTTP with SigV4 signing.
+# The AWS Knowledge MCP is a remote HTTPS server (GA) at
+# `https://knowledge-mcp.global.api.aws`; forwarded over MCP Streamable
+# HTTP. No authentication needed (rate-limited only).
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
@@ -163,7 +165,7 @@ if __name__ == "__main__":
 > **Why this matters operationally:** any time AWS ships a new pricing
 > dimension, AgentCore feature, or git-repo-research capability,
 > upgrading the FastMCP container's `awslabs.*` versions is enough —
-> no Python work in this repo. Likewise, `aws-mcp.us-east-1.api.aws/mcp`
+> no Python work in this repo. Likewise, `https://knowledge-mcp.global.api.aws`
 > picks up new AWS docs the moment AWS publishes them.
 
 ### Why AgentSkills Plugin (not prompt stuffing)
@@ -326,7 +328,7 @@ Progress events: `started` → `decomposed` → `researching` → `verified` →
 | `subagent dispatch` (harness) | Strands Pattern 3 (Meta-Tool sub-agents) |
 | `$SKILL_DIR/scripts/{brave,tavily,trafilatura,sitemap_feed_extractor}.py` (custom REST/parse) | Custom `@mcp.tool()` functions in the Runtime FastMCP server |
 | `$SKILL_DIR/scripts/{aws_doc,aws_pricing,agentcore,github}_search.py` (thin clients spawning `uvx awslabs.*-mcp-server@latest`) | Same upstream servers, spawned by the Runtime container via `uvx` and forwarded through FastMCP — no reimplementation |
-| `mcp-proxy-for-aws` → AWS Knowledge MCP (remote HTTPS) | Same remote endpoint, forwarded by the Runtime over MCP Streamable HTTP with SigV4 |
+| `mcp-proxy-for-aws` → AWS Knowledge MCP (remote HTTPS) | Same upstream service at `https://knowledge-mcp.global.api.aws`, forwarded by the Runtime over MCP Streamable HTTP (no SigV4 — the GA endpoint is unauthenticated) |
 | `fetchv2` MCP server (local process) | `fetch_url` tool in Runtime |
 | `$WORK_DIR/<slug>/` on disk | `s3://bucket/<slug>/` |
 | `.env` file with API keys | Secrets Manager |
