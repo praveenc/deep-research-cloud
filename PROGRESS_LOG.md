@@ -17,7 +17,7 @@
 | # | Priority | Task | Status |
 |---|----------|------|--------|
 | 8 | 🔴 Critical | Pre-processing Lambda (Steps 1–3 + 1g) | ✅ Done (PR #1) |
-| 9 | 🔴 Critical | CDK wiring for Pre-processing Lambda (`POST /research`) | 🟡 Open (PR #3) |
+| 9 | 🔴 Critical | CDK wiring for Pre-processing Lambda (`POST /research`) | ✅ Done (PR #3) |
 | 10 | 🔴 Critical | Agent Lambda (Strands LLM-led + Pattern 3 sub-agents) | ⚪ Pending |
 | 11 | 🔴 Critical | FastMCP runtime container (4 custom + `uvx awslabs.*` + AWS Knowledge MCP forwarder) | ⚪ Pending |
 | 12 | 🟠 High | Frontend contract-review screen (complex queries) | ⚪ Pending |
@@ -149,7 +149,7 @@ to a leaner two-Lambda + FastMCP topology. Landed via PR #1.
      `aws-docs` for CDK workflows across any project
    - Standardized container name on `my-git-workspace` everywhere
 
-### 2026-05-09 — MCP Tool Inventory Correction (PR #2, open)
+### 2026-05-09 — MCP Tool Inventory Correction (PR #2, merged)
 
 Honest-up about which MCP tools we actually own vs proxy.
 
@@ -172,7 +172,7 @@ Honest-up about which MCP tools we actually own vs proxy.
   experimental endpoint); corrected to the GA URL above per
   https://awslabs.github.io/mcp/servers/aws-knowledge-mcp-server.
 
-### 2026-05-09 — CDK Wiring for Pre-processing Lambda (PR #3, open)
+### 2026-05-09 — CDK Wiring for Pre-processing Lambda (PR #3, merged)
 
 Wires the pre-processor into the deployment so `POST /research`
 actually invokes it.
