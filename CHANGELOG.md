@@ -66,6 +66,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/)
   accepts both shapes.
 
 ### Removed
+- `app/agent/invoker/` source (AgentCore self-invoke trampoline,
+  obsoleted by `app/preprocess/handler.py` and the `POST /research`
+  swap in PR #3).
 - `.claude/` (slash commands published as global pi subagents instead).
 - `.mcp.json` (Claude Code/Cursor-specific registry).
 - `CLAUDE.md` (replaced by `AGENTS.md`).
@@ -74,7 +77,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/)
 - **Agent Lambda** — Strands LLM-led parent + Pattern 3 sub-agents that
   fills `AGENT_LAMBDA_NAME` and dispatches research after
   pre-processing. Will replace `app/agent/runtime/` (deterministic
-  Python workflow) and `app/agent/invoker/` (self-invoke trampoline).
+  Python workflow); the `app/agent/invoker/` self-invoke trampoline is
+  already deleted.
 - **FastMCP runtime container** with the corrected tool inventory
   (4 custom `@mcp.tool()` + `uvx` subprocesses for `awslabs.*` +
   Streamable HTTP forwarder for AWS Knowledge MCP).

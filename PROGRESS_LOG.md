@@ -195,5 +195,22 @@ actually invokes it.
 - `cdk synth --quiet` clean across all 6 stacks; `cdk diff` shows
   exactly the expected swap (delete + add + retarget) with no
   collateral damage.
-- `app/agent/invoker/` source kept for now; will be removed
-  alongside Agent Lambda introduction.
+- `app/agent/invoker/` source kept for now; removed in a follow-up
+  cleanup PR (see entry below).
+
+### 2026-05-09 — Remove app/agent/invoker source (PR #pending, open)
+
+Deletes the orphaned AgentCore self-invoke trampoline that PR #3
+already stopped wiring into CDK.
+
+- Deleted `app/agent/invoker/handler.py` (241 lines).
+- Verified zero references via grep across the repo (only docs
+  mentioned it, and those are updated here).
+- `cdk synth --quiet` clean across all 6 stacks (verified via
+  `cdk.ops` subagent).
+- `AGENTS.md` Repository layout: `agent/invoker/` line removed.
+- `CHANGELOG.md` [Unreleased] / Removed: bullet added; the Not Yet
+  Implemented bullet for Agent Lambda updated to reflect that the
+  trampoline is already gone.
+- Successor: the Agent Lambda introduced in a later PR will fill
+  `AGENT_LAMBDA_NAME` (currently `""`).

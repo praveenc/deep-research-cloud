@@ -32,7 +32,6 @@ app/
   agent/runtime/      Existing container agent on AgentCore Runtime
                       (deterministic Python workflow). Will be replaced
                       by an Agent Lambda in a follow-up PR.
-  agent/invoker/      API Gateway → Lambda async-invoke trampoline.
   agent/{ws,status}/  WebSocket + status handlers.
   mcp-servers/        Five Lambda MCP servers (fetch, brave, github,
                       aws-docs, feeds). Will be consolidated into a
