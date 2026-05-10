@@ -198,7 +198,7 @@ actually invokes it.
 - `app/agent/invoker/` source kept for now; removed in a follow-up
   cleanup PR (see entry below).
 
-### 2026-05-09 — Remove app/agent/invoker source (PR #pending, open)
+### 2026-05-09 — Remove app/agent/invoker source (PR #6, merged)
 
 Deletes the orphaned AgentCore self-invoke trampoline that PR #3
 already stopped wiring into CDK.
@@ -214,3 +214,29 @@ already stopped wiring into CDK.
   trampoline is already gone.
 - Successor: the Agent Lambda introduced in a later PR will fill
   `AGENT_LAMBDA_NAME` (currently `""`).
+
+### 2026-05-10 — chore(agents): add repo-docs-keeper project subagent (PR #5, merged)
+
+Adds a project-scoped pi subagent that owns post-merge bookkeeping for
+`CHANGELOG.md`, `PROGRESS_LOG.md`, and `AGENTS.md`, so the parent agent
+can hand off doc updates with a one-line pointer instead of reading
+several KB of project docs into context.
+
+- `.pi/agents/repo-docs-keeper.md` (new, +109 lines) — project-scoped
+  pi subagent definition. Hard refusals: no `git
+  commit/push/branch/merge/rebase/reset/tag`, no
+  `gh pr merge/create/edit`, no edits outside the three doc files.
+  Read-only discovery via `git log` / `git show --stat` /
+  `gh pr view --json` inside `my-git-workspace`. Workflow: parse
+  pointer → read existing files → decide which need updates → edit
+  surgically → verify with `git diff --stat`. Enforces per-file
+  conventions (CHANGELOG groupings, PROGRESS_LOG heading format,
+  AGENTS triggers, status icons) and outputs a tight 3-line summary.
+- `AGENTS.md` (+25 lines) — new "Project subagents" section pointing
+  to `repo-docs-keeper`, plus a list of user-scoped helpers
+  (`git-commits-docker`, `cdk.ops`, `cdk.review`, `aws-docs`) that
+  pair well with the workflow but are not checked in.
+- `PROGRESS_LOG.md` (+3 −3) — bookkeeping flips from the agent's
+  self-test: roadmap row #9 (CDK wiring for Pre-processing Lambda)
+  🟡 Open → ✅ Done; PR #2 and PR #3 dated-entry headings
+  `(open)` → `(merged)`.
