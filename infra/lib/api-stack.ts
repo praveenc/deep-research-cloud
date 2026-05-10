@@ -21,8 +21,13 @@ export interface ApiStackProps extends cdk.StackProps {
  * API Layer — REST API + WebSocket API + Cognito User Pool.
  *
  * REST:
- *   POST /research       → async invoke AgentCore Runtime agent
+ *   POST /research              → Pre-processing Lambda (intent / strategy
+ *                                  / decompose / research contract / slug)
  *   GET  /research/{slug}/status → poll task status from DDB
+ *
+ * The Agent Lambda that performs the actual research is wired in a follow-up
+ * PR; until then AGENT_LAMBDA_NAME is empty and the pre-processor returns
+ * the plan to the client without dispatching anything downstream.
  *
  * WebSocket: Real-time progress updates from agent → client
  */
@@ -59,45 +64,51 @@ export class ApiStack extends cdk.Stack {
       preventUserExistenceErrors: true,
     });
 
-    // ─── REST API — Invoker + Status ─────────────────────────────────
-    // Thin Lambda that validates the request and async-invokes AgentCore Runtime
-    const invokerHandler = new lambda.Function(this, 'InvokerHandler', {
-      functionName: `deep-research-invoker-${props.config.stage}`,
-      description: 'Validates research request, writes task to DDB, async self-invokes to call AgentCore Runtime',
+    // ─── REST API — Pre-processing + Status ─────────────────────────────────
+    // Pre-processing Lambda — implements Steps 1, 2, 3, 1g of the local
+    // aws-deep-research skill (intent / strategy / decompose / contract /
+    // slug). One Strands `agent.structured_output` call drives the plan;
+    // contract is written to S3, tracking record to DDB, and (when an
+    // Agent Lambda exists in a follow-up PR) simple queries auto-dispatch.
+    const preprocessHandler = new lambda.Function(this, 'PreprocessHandler', {
+      functionName: `deep-research-preprocess-${props.config.stage}`,
+      description: 'Steps 1–3 + 1g of the aws-deep-research skill: classify intent, build research contract, decompose, mint slug',
       runtime: lambda.Runtime.PYTHON_3_13,
       architecture: lambda.Architecture.ARM_64,
-      handler: 'handler.lambda_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../app/agent/invoker')),
-      timeout: cdk.Duration.minutes(15), // Async worker mode needs full 15 min for AgentCore call
-      memorySize: 256,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../app/preprocess')),
+      timeout: cdk.Duration.seconds(90),  // 1–2 LLM calls, ~15–30s typical
+      memorySize: 512,
       environment: {
         STAGE: props.config.stage,
         TRACKING_TABLE: props.trackingTable.tableName,
         RESEARCH_BUCKET: props.researchBucket.bucketName,
-        // Set post-deploy via: aws lambda update-function-configuration
-        // Value: arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtimeId>
-        AGENT_RUNTIME_ARN: '',
+        BEDROCK_MODEL_ID: props.config.bedrockModelId,
+        // Wired post-deploy when the Agent Lambda lands (follow-up PR).
+        // Empty string disables the auto-dispatch hand-off; pre-processor
+        // still returns the full plan to the client.
+        AGENT_LAMBDA_NAME: '',
       },
     });
 
-    // Invoker permissions
-    props.trackingTable.grantReadWriteData(invokerHandler);
+    // Pre-processor permissions — strict least privilege
+    props.trackingTable.grantWriteData(preprocessHandler);
+    props.researchBucket.grantPut(preprocessHandler);  // contract.md + plan.json under <slug>/
 
-    // Allow invoker to async-invoke itself (for long-running AgentCore calls)
-    invokerHandler.addToRolePolicy(new iam.PolicyStatement({
-      sid: 'SelfInvoke',
-      effect: iam.Effect.ALLOW,
-      actions: ['lambda:InvokeFunction'],
-      resources: [`arn:aws:lambda:${this.region}:${this.account}:function:deep-research-invoker-${props.config.stage}`],
-    }));
-
-    invokerHandler.addToRolePolicy(new iam.PolicyStatement({
-      sid: 'InvokeAgentRuntime',
+    // Bedrock model invocation — scope to the configured inference profile
+    // and the Anthropic foundation models it forwards to. Cross-region
+    // inference profiles span regions; wildcard the region in the ARN.
+    preprocessHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'InvokeBedrockModel',
       effect: iam.Effect.ALLOW,
       actions: [
-        'bedrock-agentcore:InvokeAgentRuntime',
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
       ],
-      resources: ['*'],
+      resources: [
+        `arn:aws:bedrock:*:${this.account}:inference-profile/${props.config.bedrockModelId}`,
+        `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+      ],
     }));
 
     // Status handler — reads task status from DynamoDB
@@ -139,10 +150,13 @@ export class ApiStack extends cdk.Stack {
       identitySource: 'method.request.header.Authorization',
     });
 
-    // POST /research — async invoke
+    // POST /research — invokes the Pre-processing Lambda. For complex
+    // queries the response carries the contract for client-side approval;
+    // for simple queries the Lambda hand-offs to the Agent Lambda async
+    // (no-op until AGENT_LAMBDA_NAME is set in a follow-up PR).
     const researchResource = restApi.root.addResource('research');
     researchResource.addMethod('POST',
-      new apigateway.LambdaIntegration(invokerHandler),
+      new apigateway.LambdaIntegration(preprocessHandler),
       {
         authorizer: cognitoAuthorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,
